@@ -5,10 +5,18 @@ import (
 	"net/http"
 	"log"
 	"sync/atomic"
+	"encoding/json"
+	"strings"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+}
+
+type Chirp struct {
+	Body string `json:"body"`
+	Error string `json:"error,omitempty"`
+	Cleaned_body string `json:"cleaned_body"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc (next http.Handler) http.Handler {
@@ -21,11 +29,73 @@ func (cfg *apiConfig) middlewareMetricsInc (next http.Handler) http.Handler {
 func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	hits := cfg.fileserverHits.Load()
 	fmt.Fprintf(w, "Hits: %d", hits)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+
+	htmlContent := fmt.Sprintf(`
+	<!DOCTYPE html>
+	<html>
+  		<body>
+    		<h1>Welcome, Chirpy Admin</h1>
+    		<p>Chirpy has been visited %d times!</p>
+  		</body>
+	</html>
+	`, hits)
+
+	w.Write([]byte(htmlContent))
 }
 
 func (cfg *apiConfig) resetMetrics(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 }
+
+func profanityfilter(body string) string {
+	profanities := []string{ "kerfuffle", "sharbert", "fornax"}
+
+	words := strings.Split(body, " ")
+
+	for i, word := range words {
+		loweredWord := strings.ToLower(word)
+
+		for _, badWord := range profanities {
+			if loweredWord == badWord {
+				words[i] = "****"
+			}
+		}
+	}
+
+	return strings.Join(words, " ")
+}
+
+
+func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	var req Chirp
+	encoder := json.NewEncoder(w)
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&req)
+
+	if err != nil {
+		w.WriteHeader(500)
+		encoder.Encode(Chirp{Error: "Something went wrong"})
+		return
+	}
+
+	// checking length
+	if len(req.Body) > 140 {
+		w.WriteHeader(http.StatusBadRequest)
+		encoder.Encode(Chirp{Error: "Chirp is too long"})
+		return
+	}
+
+	cleaned_body := profanityfilter(req.Body)
+
+	w.WriteHeader(200)
+	encoder.Encode(Chirp{Cleaned_body: cleaned_body})
+
+	}	
 
 func main() {
 	mux := http.NewServeMux()
@@ -37,11 +107,12 @@ func main() {
 	handler := http.StripPrefix("/app", filepathHandler)
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(handler))
 	
-	mux.HandleFunc("POST /reset", apiCfg.resetMetrics)
-	mux.HandleFunc("GET /metrics", apiCfg.handleMetrics)
+	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetrics)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.handleMetrics)
 
 	// health check
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
 	// writing content type header
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
