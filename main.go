@@ -7,10 +7,16 @@ import (
 	"sync/atomic"
 	"encoding/json"
 	"strings"
+	"github.com/joho/godotenv"
+	"os"
+	_ "github.com/lib/pq"
+	"database/sql"
+	"github.com/excylni/chirpy-go/internal/database"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dataBaseQueries *database.Queries
 }
 
 type Chirp struct {
@@ -98,10 +104,18 @@ func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 	}	
 
 func main() {
+	fmt.Print("Hello World!")
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+
+	dbQueries := database.New(db)
+
 	mux := http.NewServeMux()
-	apiCfg := apiConfig{}
-	
-	
+	apiCfg := apiConfig{
+		dataBaseQueries: dbQueries,
+	}
+
 	filepathHandler := http.FileServer(http.Dir("."))
 
 	handler := http.StripPrefix("/app", filepathHandler)
@@ -124,8 +138,9 @@ func main() {
 		Handler: mux,
 	}
 
-	fmt.Println("Server starting on http://localhost:8080 ...")
-	err := server.ListenAndServe()
+	//fmt.Println("Server starting on http://localhost:8080 ...")
+
+	err = server.ListenAndServe() 
 	if err != nil {
 		log.Fatal("Server crashed: ", err)
 		}
