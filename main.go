@@ -8,21 +8,75 @@ import (
 	"encoding/json"
 	"strings"
 	"github.com/joho/godotenv"
+	"github.com/google/uuid"
 	"os"
 	_ "github.com/lib/pq"
 	"database/sql"
 	"github.com/excylni/chirpy-go/internal/database"
+	"time"
 )
+
+func main() {
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+
+	dbQueries := database.New(db)
+
+	mux := http.NewServeMux()
+	apiCfg := apiConfig{
+		dataBaseQueries: dbQueries,
+		platform : os.Getenv("PLATFORM"),
+	}
+
+	filepathHandler := http.FileServer(http.Dir("."))
+
+	handler := http.StripPrefix("/app", filepathHandler)
+	mux.Handle("/app/", apiCfg.middlewareMetricsInc(handler))
+	
+	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetrics)
+	mux.HandleFunc("POST /api/users", apiCfg.handleCreateUser)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.handleMetrics)
+
+	// health check
+	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
+	// writing content type header
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	server := &http.Server{
+		Addr: ":8080",
+		Handler: mux,
+	}
+
+	fmt.Println("Server starting on http://localhost:8080 ...")
+
+	err = server.ListenAndServe() 
+	if err != nil {
+		log.Fatal("Server crashed: ", err)
+		}
+}
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dataBaseQueries *database.Queries
+	platform string
 }
 
 type Chirp struct {
 	Body string `json:"body"`
 	Error string `json:"error,omitempty"`
 	Cleaned_body string `json:"cleaned_body"`
+}
+
+type User struct {
+	ID uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email string  `json:"email"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc (next http.Handler) http.Handler {
@@ -53,7 +107,55 @@ func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) resetMetrics(w http.ResponseWriter, r *http.Request) {
+
+	if cfg.platform != "dev" {
+		respondWithError(w, 403, "Forbidden")
+		return
+	}
+	ctx := r.Context()
+	err := cfg.dataBaseQueries.DeleteUsers(ctx)
+	if err != nil {
+		respondWithError(w, 500, "Internal Server Error, try again later")
+		return
+	}
+	
 	cfg.fileserverHits.Store(0)
+}
+
+func (cfg *apiConfig) handleCreateUser (w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	type parameters struct {
+		Email string `json:"email"`
+	}
+
+	var req parameters
+	encoder := json.NewEncoder(w)
+	decoder := json.NewDecoder(r.Body)
+	
+	err := decoder.Decode(&req)
+	if err != nil {
+		respondWithError(w, 400, "failed to decode json")
+		return
+	}
+
+	// Create User
+	ctx := r.Context()
+	user, err := cfg.dataBaseQueries.CreateUser(ctx, req.Email)
+	if err != nil {
+		respondWithError(w, 500, "internal server error")
+		return 
+	}
+
+	jsonUser := User{
+		ID: user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email: user.Email,
+	}
+	
+	w.WriteHeader(201)
+	encoder.Encode(jsonUser)
+
 }
 
 func profanityfilter(body string) string {
@@ -74,6 +176,12 @@ func profanityfilter(body string) string {
 	return strings.Join(words, " ")
 }
 
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	w.WriteHeader(code)
+	error_msg := map[string]string{"error": msg}
+	json.NewEncoder(w).Encode(error_msg)
+
+}
 
 func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -81,6 +189,7 @@ func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 	var req Chirp
 	encoder := json.NewEncoder(w)
 	decoder := json.NewDecoder(r.Body)
+
 	err := decoder.Decode(&req)
 
 	if err != nil {
@@ -102,46 +211,3 @@ func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 	encoder.Encode(Chirp{Cleaned_body: cleaned_body})
 
 	}	
-
-func main() {
-	fmt.Print("Hello World!")
-	godotenv.Load()
-	dbURL := os.Getenv("DB_URL")
-	db, err := sql.Open("postgres", dbURL)
-
-	dbQueries := database.New(db)
-
-	mux := http.NewServeMux()
-	apiCfg := apiConfig{
-		dataBaseQueries: dbQueries,
-	}
-
-	filepathHandler := http.FileServer(http.Dir("."))
-
-	handler := http.StripPrefix("/app", filepathHandler)
-	mux.Handle("/app/", apiCfg.middlewareMetricsInc(handler))
-	
-	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
-	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetrics)
-	mux.HandleFunc("GET /admin/metrics", apiCfg.handleMetrics)
-
-	// health check
-	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
-	// writing content type header
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
-
-	server := &http.Server{
-		Addr: ":8080",
-		Handler: mux,
-	}
-
-	//fmt.Println("Server starting on http://localhost:8080 ...")
-
-	err = server.ListenAndServe() 
-	if err != nil {
-		log.Fatal("Server crashed: ", err)
-		}
-}
