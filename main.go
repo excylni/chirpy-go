@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"github.com/excylni/chirpy-go/internal/database"
 	"time"
+	"errors"
 )
 
 func main() {
@@ -34,7 +35,7 @@ func main() {
 	handler := http.StripPrefix("/app", filepathHandler)
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(handler))
 	
-	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
+	mux.HandleFunc("POST /api/chirps", apiCfg.handlePostChirp)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetrics)
 	mux.HandleFunc("POST /api/users", apiCfg.handleCreateUser)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handleMetrics)
@@ -67,9 +68,11 @@ type apiConfig struct {
 }
 
 type Chirp struct {
+	ID uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 	Body string `json:"body"`
-	Error string `json:"error,omitempty"`
-	Cleaned_body string `json:"cleaned_body"`
+	User_id uuid.UUID `json:"user_id"`
 }
 
 type User struct {
@@ -118,7 +121,7 @@ func (cfg *apiConfig) resetMetrics(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 500, "Internal Server Error, try again later")
 		return
 	}
-	
+
 	cfg.fileserverHits.Store(0)
 }
 
@@ -183,31 +186,60 @@ func respondWithError(w http.ResponseWriter, code int, msg string) {
 
 }
 
-func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
+func validateChirp(body string) (string, error) {
+	if len(body) > 140 {
+		return "", errors.New("Chirp too long")
+	}
+	return body, nil
+}
+
+func (cfg *apiConfig) handlePostChirp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
-	var req Chirp
+	type parameters struct {
+		Body string `json:"body"`
+		User_id uuid.UUID `json:"user_id"`	
+	}
+
+	var req parameters
 	encoder := json.NewEncoder(w)
 	decoder := json.NewDecoder(r.Body)
 
 	err := decoder.Decode(&req)
-
 	if err != nil {
-		w.WriteHeader(500)
-		encoder.Encode(Chirp{Error: "Something went wrong"})
+		respondWithError(w, 500, "failed to decode json")
 		return
 	}
 
 	// checking length
-	if len(req.Body) > 140 {
-		w.WriteHeader(http.StatusBadRequest)
-		encoder.Encode(Chirp{Error: "Chirp is too long"})
+	req.Body, err = validateChirp(req.Body)
+	if err != nil {
+		respondWithError(w, 400, "Chirp is too long")
 		return
 	}
 
-	cleaned_body := profanityfilter(req.Body)
+	req.Body = profanityfilter(req.Body)
 
-	w.WriteHeader(200)
-	encoder.Encode(Chirp{Cleaned_body: cleaned_body})
+	ctx := r.Context()
+	newChirp, err := cfg.dataBaseQueries.CreateChirp(ctx, database.CreateChirpParams{
+		Body: req.Body,
+		UserID: req.User_id,
 
+	})
+
+	w.WriteHeader(201)
+
+	jsonChirp := Chirp{
+		ID: newChirp.ID,
+		CreatedAt: newChirp.CreatedAt,
+		UpdatedAt: newChirp.UpdatedAt,
+		Body: newChirp.Body,
+		User_id: newChirp.UserID,
+	}
+
+	w.WriteHeader(201)
+	encoder.Encode(jsonChirp)
+
+	
 	}	
+
