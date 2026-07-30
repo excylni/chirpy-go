@@ -39,6 +39,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetrics)
 	mux.HandleFunc("POST /api/users", apiCfg.handleCreateUser)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handleMetrics)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handleReturnChirps)
 
 	// health check
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
@@ -80,6 +81,34 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email string  `json:"email"`
+}
+
+func (cfg *apiConfig) handleReturnChirps (w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	ctx := r.Context()
+	sortedChirps, err := cfg.dataBaseQueries.GetChirps(ctx)
+	if err != nil {
+		respondWithError(w, 500, "try later")
+		return
+	}
+	var Chirps []Chirp 
+
+	for _, chirp := range(sortedChirps) {
+		jsonChirp := Chirp{
+		ID: chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body: chirp.Body,
+		User_id: chirp.UserID,
+	}
+
+	Chirps = append(Chirps,jsonChirp)
+	}
+
+	w.WriteHeader(200)
+	encoder.Encode(Chirps)
+
 }
 
 func (cfg *apiConfig) middlewareMetricsInc (next http.Handler) http.Handler {
@@ -224,8 +253,12 @@ func (cfg *apiConfig) handlePostChirp(w http.ResponseWriter, r *http.Request) {
 	newChirp, err := cfg.dataBaseQueries.CreateChirp(ctx, database.CreateChirpParams{
 		Body: req.Body,
 		UserID: req.User_id,
-
 	})
+
+	if err != nil{
+		respondWithError(w, 500, "try later")
+		return
+	}
 
 	w.WriteHeader(201)
 
@@ -239,7 +272,5 @@ func (cfg *apiConfig) handlePostChirp(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(201)
 	encoder.Encode(jsonChirp)
-
-	
-	}	
+}	
 
