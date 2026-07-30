@@ -13,6 +13,7 @@ import (
 	_ "github.com/lib/pq"
 	"database/sql"
 	"github.com/excylni/chirpy-go/internal/database"
+	"github.com/excylni/chirpy-go/internal/auth"
 	"time"
 	"errors"
 )
@@ -38,8 +39,10 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlePostChirp)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetrics)
 	mux.HandleFunc("POST /api/users", apiCfg.handleCreateUser)
+	mux.HandleFunc("POST /api/login", apiCfg.handleLogin)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handleMetrics)
 	mux.HandleFunc("GET /api/chirps", apiCfg.handleReturnChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleReturnChirp)
 
 	// health check
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
@@ -81,6 +84,37 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email string  `json:"email"`
+}
+
+func (cfg *apiConfig) handleReturnChirp (w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+
+	idString := r.PathValue("chirpID")
+	chirpID, err := uuid.Parse(idString)
+	if err != nil {
+		respondWithError(w, 400, "invalid ID format")
+		return
+	}
+
+	ctx := r.Context()
+	dbChirp, err := cfg.dataBaseQueries.GetChirpByID(ctx, chirpID)
+	if err != nil {
+		respondWithError(w, 404, "not found...")
+		return
+	}
+	
+	chirp := Chirp{
+		ID: dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body: dbChirp.Body,
+		User_id: dbChirp.UserID,
+	}
+
+	w.WriteHeader(200)
+	encoder.Encode(chirp)
+	
 }
 
 func (cfg *apiConfig) handleReturnChirps (w http.ResponseWriter, r *http.Request) {
@@ -158,6 +192,7 @@ func (cfg *apiConfig) handleCreateUser (w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	type parameters struct {
 		Email string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	var req parameters
@@ -170,9 +205,19 @@ func (cfg *apiConfig) handleCreateUser (w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	hashed, err := auth.HashPassword(req.Password)
+	if err != nil {
+		respondWithError(w, 500, "internal server error")
+		return
+	}
+
 	// Create User
 	ctx := r.Context()
-	user, err := cfg.dataBaseQueries.CreateUser(ctx, req.Email)
+	user, err := cfg.dataBaseQueries.CreateUser(ctx, database.CreateUserParams{
+		Email: req.Email,
+		HashedPassword: hashed,
+	})
+
 	if err != nil {
 		respondWithError(w, 500, "internal server error")
 		return 
@@ -274,3 +319,44 @@ func (cfg *apiConfig) handlePostChirp(w http.ResponseWriter, r *http.Request) {
 	encoder.Encode(jsonChirp)
 }	
 
+func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	type parameters struct {
+		Password string `json:"password"`
+		Email string `json:"email"`
+	}
+
+	var req parameters
+	encoder := json.NewEncoder(w)
+	decoder := json.NewDecoder(r.Body)
+
+	err := decoder.Decode(&req)
+	if err != nil {
+		respondWithError(w, 400, "failed to decode json")
+		return
+	}
+
+    ctx := r.Context()
+	user, err := cfg.dataBaseQueries.GetUserByEmail(ctx, req.Email)
+	if err != nil {
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+
+	match, err := auth.CheckPasswordHash(req.Password, user.HashedPassword)
+	if err != nil || !match {
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+
+	jsonUser := User{
+		ID: user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email: user.Email,
+	}
+
+	w.WriteHeader(200)
+	encoder.Encode(jsonUser)
+
+}
