@@ -25,7 +25,7 @@ func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (str
 	return ss, nil 	
 }
 
-func validateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
+func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	// parsing the token
 	claims := &jwt.RegisteredClaims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func (token *jwt.Token) (any, error){

@@ -50,7 +50,7 @@ func TestValidateJWT(t *testing.T) {
 				t.Fatalf("failed to make JWT: %v", err)
 			}
 		
-		extractedID, err := validateJWT(tokenString, tt.valSecret)
+		extractedID, err := ValidateJWT(tokenString, tt.valSecret)
 		
 		// checking error behavior
 		if tt.wantErr {

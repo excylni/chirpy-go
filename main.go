@@ -29,6 +29,7 @@ func main() {
 	apiCfg := apiConfig{
 		dataBaseQueries: dbQueries,
 		platform : os.Getenv("PLATFORM"),
+		jwtSecret: os.Getenv("JWT_SECRET"),
 	}
 
 	filepathHandler := http.FileServer(http.Dir("."))
@@ -36,12 +37,12 @@ func main() {
 	handler := http.StripPrefix("/app", filepathHandler)
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(handler))
 	
-	mux.HandleFunc("POST /api/chirps", apiCfg.handlePostChirp)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetrics)
 	mux.HandleFunc("POST /api/users", apiCfg.handleCreateUser)
 	mux.HandleFunc("POST /api/login", apiCfg.handleLogin)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handleMetrics)
 	mux.HandleFunc("GET /api/chirps", apiCfg.handleReturnChirps)
+	mux.HandleFunc("POST /api/chirps", apiCfg.handlePostChirp)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleReturnChirp)
 
 	// health check
@@ -69,6 +70,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dataBaseQueries *database.Queries
 	platform string
+	jwtSecret string
 }
 
 type Chirp struct {
@@ -122,6 +124,7 @@ func (cfg *apiConfig) handleReturnChirps (w http.ResponseWriter, r *http.Request
 	encoder := json.NewEncoder(w)
 	ctx := r.Context()
 	sortedChirps, err := cfg.dataBaseQueries.GetChirps(ctx)
+
 	if err != nil {
 		respondWithError(w, 500, "try later")
 		return
@@ -269,17 +272,27 @@ func validateChirp(body string) (string, error) {
 
 func (cfg *apiConfig) handlePostChirp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "missing or invalid token")
+		return
+	}
 	
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, 401, "missing or invalid token")
+	}
+
 	type parameters struct {
 		Body string `json:"body"`
-		User_id uuid.UUID `json:"user_id"`	
 	}
 
 	var req parameters
 	encoder := json.NewEncoder(w)
 	decoder := json.NewDecoder(r.Body)
 
-	err := decoder.Decode(&req)
+	err = decoder.Decode(&req)
 	if err != nil {
 		respondWithError(w, 500, "failed to decode json")
 		return
@@ -297,11 +310,11 @@ func (cfg *apiConfig) handlePostChirp(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	newChirp, err := cfg.dataBaseQueries.CreateChirp(ctx, database.CreateChirpParams{
 		Body: req.Body,
-		UserID: req.User_id,
+		UserID: userID,
 	})
 
 	if err != nil{
-		respondWithError(w, 500, "try later")
+		respondWithError(w, 500, "internal server error, try later")
 		return
 	}
 
@@ -324,6 +337,15 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Password string `json:"password"`
 		Email string `json:"email"`
+		Expires_in_seconds *int `json:"expires_in_seconds"`
+	}
+
+	type LoginResponse struct {
+		ID 	uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email string `json:"email"`
+		Token string `json:"token"`
 	}
 
 	var req parameters
@@ -335,6 +357,16 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 400, "failed to decode json")
 		return
 	}
+
+	expiresIn := time.Hour
+
+	if req.Expires_in_seconds != nil {
+		requestDuration := time.Duration(*req.Expires_in_seconds) * time.Second
+
+		if requestDuration < expiresIn {
+			expiresIn = requestDuration
+		}
+	} 
 
     ctx := r.Context()
 	user, err := cfg.dataBaseQueries.GetUserByEmail(ctx, req.Email)
@@ -349,14 +381,16 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jsonUser := User{
+	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, expiresIn)
+
+	response := LoginResponse{
 		ID: user.ID,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
+		Token: token,
 	}
 
 	w.WriteHeader(200)
-	encoder.Encode(jsonUser)
-
+	encoder.Encode(response)
 }
