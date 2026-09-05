@@ -1,21 +1,22 @@
-package main 
+package main
 
 import (
-	"fmt"
-	"net/http"
-	"log"
-	"sync/atomic"
-	"encoding/json"
-	"strings"
-	"github.com/joho/godotenv"
-	"github.com/google/uuid"
-	"os"
-	_ "github.com/lib/pq"
 	"database/sql"
-	"github.com/excylni/chirpy-go/internal/database"
-	"github.com/excylni/chirpy-go/internal/auth"
-	"time"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/excylni/chirpy-go/internal/auth"
+	"github.com/excylni/chirpy-go/internal/database"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 func main() {
@@ -44,6 +45,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.handleReturnChirps)
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlePostChirp)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleReturnChirp)
+	mux.HandleFunc("POST /api/refresh", apiCfg.handleRefresh)
+	mux.HandleFunc("POST /api/revoke", apiCfg.handleRevokeToken)
 
 	// health check
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
@@ -337,7 +340,6 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Password string `json:"password"`
 		Email string `json:"email"`
-		Expires_in_seconds *int `json:"expires_in_seconds"`
 	}
 
 	type LoginResponse struct {
@@ -346,6 +348,7 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt time.Time `json:"updated_at"`
 		Email string `json:"email"`
 		Token string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 
 	var req parameters
@@ -358,16 +361,8 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// token expires after one hour
 	expiresIn := time.Hour
-
-	if req.Expires_in_seconds != nil {
-		requestDuration := time.Duration(*req.Expires_in_seconds) * time.Second
-
-		if requestDuration < expiresIn {
-			expiresIn = requestDuration
-		}
-	} 
-
     ctx := r.Context()
 	user, err := cfg.dataBaseQueries.GetUserByEmail(ctx, req.Email)
 	if err != nil {
@@ -382,6 +377,19 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, expiresIn)
+	refreshTokenStr := auth.MakeRefreshToken()
+	expiresAt := time.Now().Add(60 * 24 * time.Hour)
+
+	_, err = cfg.dataBaseQueries.CreateRefreshToken(ctx, database.CreateRefreshTokenParams{
+		Token: refreshTokenStr,
+		UserID: user.ID,
+		ExpiresAt: expiresAt,
+	})
+
+	if err != nil {
+		respondWithError(w, 500, "Couldn't save refresh token")
+		return
+	}
 
 	response := LoginResponse{
 		ID: user.ID,
@@ -389,8 +397,73 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
 		Token: token,
+		RefreshToken: refreshTokenStr,
 	}
 
 	w.WriteHeader(200)
 	encoder.Encode(response)
+}
+
+func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	encoder := json.NewEncoder(w)
+	refreshTokenStr, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "missing or invalid token")
+		return
+	}
+
+	// searching token in the database
+	ctx := r.Context()
+	refreshToken, err := cfg.dataBaseQueries.GetUserFromRefreshToken(ctx, refreshTokenStr)
+	if err != nil {
+		respondWithError(w, 401, "invalid refresh token")
+		return
+	}
+
+	// check if token is expired 
+	if refreshToken.ExpiresAt.Before(time.Now()) {
+		respondWithError(w, 401, "refresh token expired")
+		return
+	}
+
+	// check if token is revoked
+	if refreshToken.RevokedAt.Valid {
+		respondWithError(w, 401, "refresh token invalid")
+		return
+	}
+
+	// create a new access token
+	accessToken, err := auth.MakeJWT(refreshToken.UserID, cfg.jwtSecret, time.Hour)
+	if err != nil {
+		respondWithError(w, 500, "Could not create access token")
+	}
+
+	type response struct {
+		Token string `json:"token"`
+	}
+
+	tokenresponse := response {
+		Token: accessToken,
+	}
+
+	w.WriteHeader(200)
+	encoder.Encode(tokenresponse)
+}
+
+func (cfg *apiConfig) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
+	refreshTokenStr, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "missing or invalid token")
+		return
+	}
+
+	// searching token in the database
+	ctx := r.Context()
+	err = cfg.dataBaseQueries.RevokeRefreshToken(ctx, refreshTokenStr)
+	if err != nil {
+		respondWithError(w, 501, "internal server error")
+		return
+	}
+
+	w.WriteHeader(204)
 }
