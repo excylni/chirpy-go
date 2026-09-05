@@ -47,6 +47,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleReturnChirp)
 	mux.HandleFunc("POST /api/refresh", apiCfg.handleRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.handleRevokeToken)
+	mux.HandleFunc("PUT /api/users", apiCfg.handleUpdateUser)
+
 
 	// health check
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
@@ -467,3 +469,50 @@ func (cfg *apiConfig) handleRevokeToken(w http.ResponseWriter, r *http.Request) 
 
 	w.WriteHeader(204)
 }
+
+func (cfg  *apiConfig) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password string `json:"password"`
+		Email string `json:"email"`
+	}
+
+	var req parameters
+	encoder := json.NewEncoder(w)
+	decoder := json.NewDecoder(r.Body)
+
+	tokenStr, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "unauthorized access")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(tokenStr, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, 401, "unauthorized access")
+	}
+
+	err = decoder.Decode(&req)
+	if err != nil {
+		respondWithError(w, 400, "failed to decode json")
+		return
+	}
+	ctx := r.Context()
+	hash, err := auth.HashPassword(req.Password)
+	err = cfg.dataBaseQueries.UpdateUserPasswordEmail(ctx, database.UpdateUserPasswordEmailParams{
+		Email: req.Email,
+		HashedPassword: hash,
+		ID: userID,
+	})
+
+	if err != nil{
+		respondWithError(w, 500, "failed to update user")
+	}
+
+	response := User{
+		ID: userID,
+		Email: req.Email,
+	}
+
+	w.WriteHeader(200)
+	encoder.Encode(response)
+}	
