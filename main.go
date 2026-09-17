@@ -42,12 +42,15 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.handleCreateUser)
 	mux.HandleFunc("POST /api/login", apiCfg.handleLogin)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handleMetrics)
+	// get all chirps from database
 	mux.HandleFunc("GET /api/chirps", apiCfg.handleReturnChirps)
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlePostChirp)
+	// get chirp  by id
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleReturnChirp)
 	mux.HandleFunc("POST /api/refresh", apiCfg.handleRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.handleRevokeToken)
 	mux.HandleFunc("PUT /api/users", apiCfg.handleUpdateUser)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handleDeleteChirp)
 
 
 	// health check
@@ -93,6 +96,7 @@ type User struct {
 	Email string  `json:"email"`
 }
 
+// get chirp by id
 func (cfg *apiConfig) handleReturnChirp (w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
@@ -124,6 +128,7 @@ func (cfg *apiConfig) handleReturnChirp (w http.ResponseWriter, r *http.Request)
 	
 }
 
+// function to retrieve all chirps
 func (cfg *apiConfig) handleReturnChirps (w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
@@ -516,3 +521,49 @@ func (cfg  *apiConfig) handleUpdateUser(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(200)
 	encoder.Encode(response)
 }	
+
+func (cfg *apiConfig) handleDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	chirpIDstr := r.PathValue("chirpID")
+	chirpID, err := uuid.Parse(chirpIDstr)
+	if err != nil {
+		respondWithError(w, 400, "invalid chirp ID")
+		return
+	}
+
+	// check Token for authorization
+	tokenStr, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "unauthorized access")
+		return
+	}
+
+	// validate the JWT
+	userID, err := auth.ValidateJWT(tokenStr, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, 401, "unauthorized access")
+		return
+	}
+
+	ctx := r.Context()
+
+	// get chirp 
+	chirp, err := cfg.dataBaseQueries.GetChirpByID(ctx, chirpID)
+	if err != nil {
+		respondWithError(w, 404, "not found")
+		return
+	}
+
+	if chirp.UserID != userID {
+		respondWithError(w, 403, "forbidden")
+		return
+	}
+
+	err = cfg.dataBaseQueries.DeleteChirp(ctx, chirpID)
+	if err != nil {
+		respondWithError(w, 500, "couln't delete chirp")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+
+}
