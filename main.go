@@ -51,6 +51,7 @@ func main() {
 	mux.HandleFunc("POST /api/revoke", apiCfg.handleRevokeToken)
 	mux.HandleFunc("PUT /api/users", apiCfg.handleUpdateUser)
 	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handleDeleteChirp)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.handleUpgradeUser)
 
 
 	// health check
@@ -94,6 +95,7 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email string  `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 // get chirp by id
@@ -356,6 +358,7 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 		Token string `json:"token"`
 		RefreshToken string `json:"refresh_token"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 	}
 
 	var req parameters
@@ -405,6 +408,7 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Email: user.Email,
 		Token: token,
 		RefreshToken: refreshTokenStr,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 
 	w.WriteHeader(200)
@@ -565,5 +569,43 @@ func (cfg *apiConfig) handleDeleteChirp(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) handleUpgradeUser (w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Event string `json:"event"`
+		Data struct {
+			UserID uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+
+	var req parameters
+	//encoder := json.NewEncoder(w)
+	decoder := json.NewDecoder(r.Body)
+
+	err := decoder.Decode(&req)
+	if err != nil {
+		respondWithError(w, 400, "failed to decode json")
+		return
+	}
+
+	if req.Event != "user.upgraded" {
+		w.WriteHeader(204)
+		return 
+	}
+
+	ctx := r.Context()
+	_, err = cfg.dataBaseQueries.UpgradeUser(ctx, req.Data.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+       		respondWithError(w, 404, "User not found")
+        	return
+    	}
+		log.Printf("DATABASE ERROR IN UPGRADEUSER: %v", err)
+    	respondWithError(w, 500, "Couldn't upgrade user")
+    	return
+	}
+
+	w.WriteHeader(204)
 
 }
