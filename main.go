@@ -31,6 +31,7 @@ func main() {
 		dataBaseQueries: dbQueries,
 		platform : os.Getenv("PLATFORM"),
 		jwtSecret: os.Getenv("JWT_SECRET"),
+		polkaKey: os.Getenv("POLKA_KEY"),
 	}
 
 	filepathHandler := http.FileServer(http.Dir("."))
@@ -80,6 +81,7 @@ type apiConfig struct {
 	dataBaseQueries *database.Queries
 	platform string
 	jwtSecret string
+	polkaKey string
 }
 
 type Chirp struct {
@@ -133,14 +135,33 @@ func (cfg *apiConfig) handleReturnChirp (w http.ResponseWriter, r *http.Request)
 // function to retrieve all chirps
 func (cfg *apiConfig) handleReturnChirps (w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	authorIDString := r.URL.Query().Get("author_id")
 	encoder := json.NewEncoder(w)
+	var sortedChirps []database.Chirp
+	var err error
+	
 	ctx := r.Context()
-	sortedChirps, err := cfg.dataBaseQueries.GetChirps(ctx)
+	if authorIDString != "" {
+		authorID, err := uuid.Parse(authorIDString)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid author ID format")
+			return
+		}
 
-	if err != nil {
-		respondWithError(w, 500, "try later")
-		return
+		sortedChirps, err = cfg.dataBaseQueries.GetChirpByAuthor(ctx, authorID)
+		if err != nil {
+			respondWithError(w, 500, "Internal server error")
+			return
+		}
+	} else {
+
+		sortedChirps, err = cfg.dataBaseQueries.GetChirps(ctx)
+		if err != nil {
+			respondWithError(w, 500, "try later")
+			return
 	}
+	}
+	
 	var Chirps []Chirp 
 
 	for _, chirp := range(sortedChirps) {
@@ -581,9 +602,20 @@ func (cfg *apiConfig) handleUpgradeUser (w http.ResponseWriter, r *http.Request)
 
 	var req parameters
 	//encoder := json.NewEncoder(w)
-	decoder := json.NewDecoder(r.Body)
+	
+	keyString, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "failed to extract Key")
+		return
+	}
+	
+	if keyString != cfg.polkaKey {
+		respondWithError(w, 401, "unauthorized access")
+		return
+	}
 
-	err := decoder.Decode(&req)
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&req)
 	if err != nil {
 		respondWithError(w, 400, "failed to decode json")
 		return
